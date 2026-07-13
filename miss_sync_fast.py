@@ -13,6 +13,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import urljoin
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
@@ -201,6 +202,67 @@ def fetch_html_fast(url: str) -> str:
         return ""
 
 
+def get_all_product_links_from_category_fast(category_url: str, log_print=print) -> list:
+    links = set()
+    page = 1
+    driver = _get_driver()
+
+    while page <= 100:
+        if page == 1:
+            url = category_url.rstrip("/") + "/"
+        else:
+            url = f"{category_url.rstrip('/')}/page/{page}/"
+
+        try:
+            driver.get(url)
+            try:
+                WebDriverWait(driver, 12).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "li.product a[href]"))
+                )
+            except Exception:
+                time.sleep(2)
+
+            html = driver.page_source or ""
+            soup = sync._bs(html)
+            anchors = soup.select(
+                "ul.products li.product a[href], "
+                "li.product a.woocommerce-LoopProduct-link[href], "
+                "li.product a.woocommerce-loop-product__link[href], "
+                "li.product a[href*='/proizvod/'], "
+                "li.product a[href*='/product/']"
+            )
+
+            page_links = set()
+            for anchor in anchors:
+                href = urljoin(url, anchor.get("href") or "")
+                if "/proizvod/" in href or "/product/" in href:
+                    page_links.add(href.split("#", 1)[0])
+
+            if not page_links:
+                log_print(
+                    f"[WARN] Kategorija nema proizvode na strani {page}; "
+                    f"title='{driver.title}', url='{driver.current_url}', html={len(html)}"
+                )
+                break
+
+            before = len(links)
+            links.update(page_links)
+            added = len(links) - before
+            log_print(f"[PAGE {page}] +{added} (total {len(links)})")
+
+            if added == 0:
+                break
+
+            page += 1
+
+        except Exception as exc:
+            log_print(f"[WARN] Kategorija strana {page} nije ucitana: {exc}")
+            _discard_thread_driver()
+            break
+
+    return list(links)
+
+
 def scrape_categories_with_progress(categories, max_workers=4, log_print=print):
     all_links = set()
 
@@ -209,6 +271,8 @@ def scrape_categories_with_progress(categories, max_workers=4, log_print=print):
         links = sync.get_all_product_links_from_category(category, log_print=log_print)
         log_print(f"[SCRAPE] Nadjeno {len(links)} proizvoda")
         all_links.update(links)
+
+    _discard_thread_driver()
 
     links = list(all_links)
     total = len(links)
@@ -239,6 +303,7 @@ def main():
     os.chdir(ORIGINAL_SCRIPT.parent)
     _install_shopify_rate_limit()
     sync.fetch_html = fetch_html_fast
+    sync.get_all_product_links_from_category = get_all_product_links_from_category_fast
     sync.scrape_categories_parallel = scrape_categories_with_progress
     sync.main()
 
